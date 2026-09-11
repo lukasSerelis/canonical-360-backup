@@ -1,0 +1,3 @@
+# Never commit exported personal feedback
+360-backup.*
+*-feedback-backup.md
