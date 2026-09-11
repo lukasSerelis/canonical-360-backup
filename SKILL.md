@@ -1,58 +1,90 @@
 ---
 name: canonical-360-backup
 description: >-
-  Back up your written Canonical 360 review feedback and draft reviews offline.
-  Use when someone wants to export their 360 feedback (self-reflection, per-person
-  "done well" / "encourage next" answers, and selected statements) to local files,
-  or re-import offline-written drafts. Extraction is fully programmatic via a
-  browser-console script — no LLM parsing required.
+  Hands-off backup of a user's written Canonical 360 review feedback, and offline
+  drafting/re-import. Trigger this skill when a user pastes this repo's URL and
+  asks to back up or export their 360 feedback, or to re-enter offline drafts.
+  The agent drives a browser to extract everything programmatically (self-reflection,
+  per-person "done well" / "encourage next" answers, and selected statements) and
+  saves local files. No LLM parsing of content is required.
 ---
 
-# Canonical 360 backup
+# Canonical 360 backup (agent-driven)
 
-A tiny, script-driven workflow to (1) export all of your 360 feedback to
-Markdown + JSON and (2) optionally type offline drafts back into the tool.
+**Goal: the user pastes this repo URL, says "back up my 360 feedback", and the
+agent does the rest.** Keep user input to a minimum — do not ask questions you can
+answer by inspecting the page. The only thing the agent cannot do is log in.
 
-Everything runs inside the user's own authenticated browser session. No
-credentials are read, stored, or transmitted, and nothing is ever submitted
-automatically.
+## Golden path — the agent runs the whole thing
 
-## When to use
-- "Back up my 360 feedback."
-- "Export my written reviews so I can work offline."
-- "Re-enter the reviews I drafted offline."
+Follow these steps in order. Prefer this over the manual console script.
 
-## Steps
+1. **Get the user into their session (one-time, unavoidable).**
+   Ask the user to log in to `https://360.canonical.com` and open their reviews
+   page in a shared browser tab. Never request or type their password/SSO/2FA;
+   never attempt to authenticate for them.
 
-### 1. Export a backup (programmatic — preferred)
-1. Ask the user to log in to `https://360.canonical.com` and open their reviews page.
-2. Have them open DevTools (F12) → Console.
-3. Have them paste the contents of [`scripts/extract.js`](scripts/extract.js) and press Enter.
-4. Two files download: `360-backup.md` (readable + offline template) and `360-backup.json`.
+2. **Attach to the tab.** Use the browser tools to open/share the page. Confirm the
+   reviewee list is present by checking for `nav[aria-label="Reviews navigation"]`.
 
-The script reads the reviewee list from the navigation, visits every review that
-has content (self-reflection + anything marked *Completed*), and captures the
-question labels, answers, and selected statements directly from the DOM. To-do /
-skipped reviewees are listed with blank templates so they can be drafted offline.
+3. **Run the extraction core.** Evaluate the contents of
+   [`scripts/agent-extract.js`](scripts/agent-extract.js) in the page (e.g. a
+   Playwright `page.evaluate` / run-code tool). It clicks through every review with
+   content and stores the result on `window.__fb360`, returning only a short status
+   string.
 
-### 2. Draft offline
-Edit `360-backup.md` (or the JSON) in any editor. Blank sections are ready-to-fill
-templates using the two standard prompts:
+   > ⚠️ **Do not return the full dataset from the page.** Several agent runtimes
+   > write the tool's return value and the page snapshot to the *same* temp file,
+   > so a large payload gets overwritten by the snapshot and is lost. That is the
+   > cause of "the return value wasn't captured / content.txt only has the
+   > snapshot". `agent-extract.js` avoids this by caching to `window.__fb360`.
+
+4. **Pull the data back in small slices** (each small enough to return inline):
+
+   ```js
+   JSON.stringify(window.__fb360.slice(0, 5))
+   JSON.stringify(window.__fb360.slice(5, 10))
+   JSON.stringify(window.__fb360.slice(10, 15))
+   // …continue until you've covered window.__fb360.length
+   ```
+
+   First check the count with `window.__fb360.length`, then slice in batches of ~5.
+
+5. **Write the backup files to the workspace** from the collected slices:
+   - `360-backup.json` — the raw array.
+   - `360-backup.md` — grouped by category; each reviewee shows status, selected
+     statements, and the two answers. For not-started reviewees, emit blank
+     templates using the two standard prompts (see below) so they can be drafted
+     offline.
+
+6. **Report** a short summary: how many reviewees, how many had content, and the
+   file paths. Do **not** paste the full feedback back into chat unless asked.
+
+### The two standard prompts (used for blank templates)
 - *What have they done well in the past cycle?*
 - *What would you encourage them to do in the next cycle?*
 
-### 3. Re-import drafts (optional)
-1. Log in and open the reviews page.
-2. In the Console, set `window.__drafts = [{ name, done_well, encourage }, …]`.
-3. Paste [`scripts/fill.js`](scripts/fill.js) and press Enter.
-4. The script fills each reviewee's fields; the user reviews and clicks Save/Submit manually.
+## Offline drafting
+The user edits `360-backup.md` (or the JSON) in any editor. Blank sections are
+ready to fill.
 
-## Notes for the assistant
-- Do **not** attempt to log in for the user or request their password/SSO/2FA.
-- Prefer running `extract.js` over manually clicking and reading pages — it is
-  faster, deterministic, and does not rely on the model to parse content.
-- Never commit anyone's exported feedback (`360-backup.*`) to source control; it
-  is private personal data.
-- Selectors depend on the 360 UI: reviewee list `nav[aria-label="Reviews navigation"]`,
-  feedback fields `main textarea`, statements `main [role="tab"]`. Update the
-  scripts if the UI changes.
+## Re-import drafts (agent-driven, optional)
+When the user is logged in with the reviews page open and wants drafts entered:
+1. Have their drafts as `[{ name, done_well, encourage }, …]`.
+2. Set `window.__drafts = <that array>` in the page, then evaluate
+   [`scripts/fill.js`](scripts/fill.js). It types each answer into the fields but
+   **never submits** — the user saves each review manually.
+
+## Manual fallback (no agent)
+If no agent/browser automation is available, the user can paste
+[`scripts/extract.js`](scripts/extract.js) into DevTools → Console; it downloads
+`360-backup.md` + `360-backup.json` directly.
+
+## Guardrails for the assistant
+- Never log in for the user or handle credentials/2FA.
+- Prefer programmatic extraction; do not read/summarize each page with the model.
+- Never commit anyone's `360-backup.*` — it is private personal data (see
+  `.gitignore`).
+- Selectors: list `nav[aria-label="Reviews navigation"]`, fields `main textarea`,
+  statements `main [role="tab"]`, reviewee name `main a[href*="directory.canonical.com"]`.
+  Update the scripts if the 360 UI changes.
